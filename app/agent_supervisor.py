@@ -22,15 +22,39 @@ tavily_tool = TavilySearchResults(max_results=5)
 python_repl_tool = PythonREPLTool()
 
 # Step 3: Define the system prompt for the supervisor agent
-# Customize the members list as needed.
+members = ["Researcher", "Coder", "Reviewer", "QA Tester"]
+system_prompt = f"You are a supervisor of the following workers: {members}. Given the following user request, respond with the work to act next. Each worker will perform a task and then respond with their results and status. When finished, respond with FINISH"
 
 # Step 4: Define options for the supervisor to choose from
+options = members + ["FINISH"]
 
 # Step 5: Define the function for OpenAI function calling
-# Define what the function should do and its parameters.
+
+function_def = {
+    "name": "route",
+    "description": "Select the next worker.",
+    "parameters": {
+        "title": "routeSchema",
+        "type": "object",
+        "properties": {"next": {"title": "Next", "anyOf": [{"enum": options}]}},
+        "required": ["next"],
+    },
+}
 
 # Step 6: Define the prompt for the supervisor agent
-# Customize the prompt if needed.
+prompt = ChatPromptTemplate.from_messages(
+    [
+        (
+            "system",
+            system_prompt,
+        ),
+        MessagesPlaceholder(variable_name="messages"),
+        (
+            "system",
+            f"Given the conversation above, select the next worker or FINISH. Select one of: {options}",
+        ),
+    ]
+).partial(options=str(options), members=str(members))
 
 # Step 7: Initialize the language model
 # Choose the model you need, e.g., "gpt-4o"
@@ -44,7 +68,12 @@ supervisor_chain = (
     | JsonOutputFunctionsParser()
 )
 
+
 # Step 9: Define a typed dictionary for agent state
+class AgentState(TypedDict):
+    messages: Annotated[Sequence[BaseMessage], operator.add]
+    next: str
+
 
 # Step 10: Function to create an agent
 # Fill in the system prompt and tools for each agent you need to create.
@@ -63,17 +92,44 @@ def create_agent(llm: ChatOpenAI, tools: list, system_prompt: str):
     executor = AgentExecutor(agent=agent, tools=tools)
     return executor
 
+
 # Step 11: Function to create an agent node
 # This function processes the state through the agent and returns the result.
 def agent_node(state, agent, name):
     result = agent.invoke(state)
     return {"messages": [HumanMessage(content=result["output"], name=name)]}
 
+
 # Step 12: Create agents and their corresponding nodes
-# Define the specific role and tools for each agent.
+research_agent = create_agent(llm, [tavily_tool], "You are a web researcher.")
+research_node = functools.partial(agent_node, agent=research_agent, name="Researcher")
+
+code_agent = create_agent(llm, [python_repl_tool], "You are a coder.")
+code_node = functools.partial(agent_node, agent=code_agent, name="Coder")
+
+review_agent = create_agent(
+    llm,
+    [tavily_tool],
+    "You are an expert reviewer and you give detailed code reviews and specific actionable feedback. You are direct and don't worry about being polite or adding prose.",
+)
+review_node = functools.partial(agent_node, agent=review_agent, name="Reviewer")
+
+
+test_agent = create_agent(
+    llm,
+    [python_repl_tool],
+    "You are a tester. You are responsible for testing the code and making sure it works as expected. You may generate safe python code using unittest or pytest.",
+)
+
+test_node = functools.partial(agent_node, agent=test_agent, name="QA Tester")
 
 # Step 13: Define the workflow using StateGraph
-# Add nodes and their corresponding functions to the workflow.
+workflow = StateGraph(AgentState)
+workflow.add_node("Reviewer", review_node)
+workflow.add_node("Coder", code_node)
+workflow.add_node("Researcher", research_node)
+workflow.add_node("QA Tester", test_node)
+workflow.add_node("supervisor", supervisor_chain)
 
 # Step 14: Add edges to the workflow
 # Ensure that all workers report back to the supervisor.
